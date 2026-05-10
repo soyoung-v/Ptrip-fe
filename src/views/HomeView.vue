@@ -1,11 +1,10 @@
 <script setup>
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
-import { searchTours } from '@/services/tourApi'
+import { fetchTourDetail, searchTours } from '@/services/tourApi'
 import { loadKakaoMap } from '@/utils/loadKakaoMap'
 
 const DEFAULT_KEYWORD = '부산'
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
 const CATEGORY_LABELS = {
   '12': '관광지',
   '14': '문화시설',
@@ -16,6 +15,17 @@ const CATEGORY_LABELS = {
   '38': '쇼핑',
   '39': '음식점',
 }
+const CATEGORY_FILTERS = [
+  '전체',
+  '관광지',
+  '문화시설',
+  '축제공연행사',
+  '여행코스',
+  '레포츠',
+  '숙박',
+  '쇼핑',
+  '음식점',
+]
 const FALLBACK_IMAGE =
   'data:image/svg+xml;charset=UTF-8,' +
   encodeURIComponent(`
@@ -42,6 +52,9 @@ const errorMessage = ref('')
 const mapErrorMessage = ref('')
 const selectedPlaceId = ref('')
 const selectedPlace = ref(null)
+const selectedCategory = ref('전체')
+const isDetailLoading = ref(false)
+const detailErrorMessage = ref('')
 
 const mapContainer = ref(null)
 const map = ref(null)
@@ -61,6 +74,7 @@ function normalizeTour(item, index) {
     telephone: item.tel?.trim() || '전화번호 정보가 없습니다.',
     image: item.firstImage || item.firstImage2 || FALLBACK_IMAGE,
     category,
+    contentTypeId: item.contentTypeId || '',
     latitude: Number.isFinite(mapY) ? mapY : null,
     longitude: Number.isFinite(mapX) ? mapX : null,
     overview: item.overview?.trim() || '',
@@ -127,7 +141,9 @@ function renderMarkers() {
 
   clearMarkers()
 
-  const validTours = tours.value.filter((tour) => tour.latitude !== null && tour.longitude !== null)
+  const validTours = filteredTours.value.filter(
+    (tour) => tour.latitude !== null && tour.longitude !== null,
+  )
 
   if (!validTours.length) {
     infoWindow.value?.close()
@@ -196,6 +212,7 @@ async function handleSearch() {
     tours.value = []
     selectedPlaceId.value = ''
     selectedPlace.value = null
+    selectedCategory.value = '전체'
     clearMarkers()
     return
   }
@@ -204,10 +221,12 @@ async function handleSearch() {
   errorMessage.value = ''
   searchKeyword.value = trimmedKeyword
   selectedPlace.value = null
+  detailErrorMessage.value = ''
 
   try {
     const data = await searchTours(trimmedKeyword)
     tours.value = data.map(normalizeTour)
+    selectedCategory.value = '전체'
     selectedPlaceId.value = tours.value[0]?.id || ''
 
     if (!tours.value.length) {
@@ -217,6 +236,7 @@ async function handleSearch() {
     tours.value = []
     selectedPlaceId.value = ''
     selectedPlace.value = null
+    selectedCategory.value = '전체'
     clearMarkers()
     errorMessage.value = error.message || '여행지 검색 중 오류가 발생했습니다.'
   } finally {
@@ -230,32 +250,91 @@ function handleCardClick(tour) {
   openPlaceOverlay(tour, true)
 }
 
-// 카드 두 번 클릭 시 상세 모달을 열어 추가 정보를 보여준다.
-function handleCardDoubleClick(tour) {
+// 상세보기 버튼에서는 가능하면 상세 API를 다시 호출해 설명 정보를 보강한다.
+async function handleOpenDetail(tour) {
   selectedPlaceId.value = tour.id
   openPlaceOverlay(tour, true)
-  selectedPlace.value = tour
+  selectedPlace.value = {
+    ...tour,
+    overview: tour.overview || '',
+  }
+  detailErrorMessage.value = ''
+  isDetailLoading.value = true
+
+  try {
+    if (!tour.id) {
+      return
+    }
+
+    const detail = normalizeTour(await fetchTourDetail(tour.id), 0)
+    selectedPlace.value = {
+      ...tour,
+      ...detail,
+      image: detail.image || tour.image,
+      overview: detail.overview || tour.overview || '',
+    }
+  } catch (error) {
+    selectedPlace.value = {
+      ...tour,
+      overview: tour.overview || '',
+    }
+    detailErrorMessage.value = error.message || '상세 정보를 불러오지 못했습니다.'
+  } finally {
+    isDetailLoading.value = false
+  }
+}
+
+function handleCategoryFilter(category) {
+  selectedCategory.value = category
+
+  const nextSelectedTour = filteredTours.value[0]
+
+  if (!nextSelectedTour) {
+    selectedPlaceId.value = ''
+    infoWindow.value?.close()
+    return
+  }
+
+  selectedPlaceId.value = nextSelectedTour.id
+  openPlaceOverlay(nextSelectedTour, false)
 }
 
 function closeModal() {
   selectedPlace.value = null
+  detailErrorMessage.value = ''
 }
+
+const filteredTours = computed(() => {
+  if (selectedCategory.value === '전체') {
+    return tours.value
+  }
+
+  return tours.value.filter((tour) => tour.category === selectedCategory.value)
+})
 
 const resultSummary = computed(() => {
   if (isLoading.value) {
     return '검색 결과를 불러오는 중입니다.'
   }
 
-  if (errorMessage.value && !tours.value.length) {
+  if (errorMessage.value && !filteredTours.value.length) {
     return errorMessage.value
   }
 
-  return `${searchKeyword.value} 검색 결과 ${tours.value.length}곳`
+  return `${searchKeyword.value} 검색 결과 ${filteredTours.value.length}곳`
 })
 
-// 검색 결과가 바뀌면 DOM과 지도를 순서대로 갱신해 카드/마커 상태를 맞춘다.
+const emptyStateMessage = computed(() => {
+  if (!tours.value.length) {
+    return '검색어를 입력하고 여행지를 찾아보세요.'
+  }
+
+  return '선택한 카테고리에 해당하는 여행지가 없습니다.'
+})
+
+// 검색 결과나 필터가 바뀌면 DOM과 지도를 순서대로 갱신해 카드/마커 상태를 맞춘다.
 watch(
-  tours,
+  filteredTours,
   async () => {
     await nextTick()
     renderMarkers()
@@ -309,33 +388,46 @@ onMounted(async () => {
           </div>
           <span class="result-count">{{ resultSummary }}</span>
         </div>
+                <div class="filter-row">
+          <button
+            v-for="category in CATEGORY_FILTERS"
+            :key="category"
+            type="button"
+            class="filter-button"
+            :class="{ active: selectedCategory === category }"
+            @click="handleCategoryFilter(category)"
+          >
+            {{ category }}
+          </button>
+        </div>
 
         <p v-if="errorMessage && tours.length" class="inline-message error">{{ errorMessage }}</p>
 
-        <div v-if="tours.length" class="card-list">
+        <div v-if="filteredTours.length" class="card-list">
           <article
-            v-for="tour in tours"
+            v-for="tour in filteredTours"
             :key="tour.id"
             class="place-card"
             :class="{ active: selectedPlaceId === tour.id }"
             @click="handleCardClick(tour)"
-            @dblclick="handleCardDoubleClick(tour)"
           >
             <img class="place-image" :src="tour.image" :alt="tour.title" />
             <div class="place-content">
               <div class="place-heading">
                 <h3>{{ tour.title }}</h3>
-                <span class="badge">{{ selectedPlaceId === tour.id ? '선택됨' : '여행지' }}</span>
+                <span class="badge">{{ tour.category }}</span>
               </div>
-              <p class="place-category">{{ tour.category }}</p>
-              <p class="place-address">{{ tour.address }}</p>
-              <p class="place-tel">{{ tour.telephone }}</p>
+              <div class="place-footer">
+                <button class="detail-button" type="button" @click.stop="handleOpenDetail(tour)">
+                  상세보기
+                </button>
+              </div>
             </div>
           </article>
         </div>
 
         <div v-else class="empty-state">
-          <p>검색어를 입력하고 여행지를 찾아보세요.</p>
+          <p>{{ emptyStateMessage }}</p>
         </div>
       </div>
 
@@ -386,15 +478,6 @@ onMounted(async () => {
               <span class="detail-label">카테고리</span>
               <p>{{ selectedPlace.category }}</p>
             </div>
-            <div class="detail-item">
-              <span class="detail-label">좌표</span>
-              <p>{{ selectedPlace.latitude ?? '-' }}, {{ selectedPlace.longitude ?? '-' }}</p>
-            </div>
-          </div>
-
-          <div v-if="selectedPlace.overview" class="overview-box">
-            <span class="detail-label">설명</span>
-            <p>{{ selectedPlace.overview }}</p>
           </div>
         </div>
       </section>
@@ -477,17 +560,11 @@ onMounted(async () => {
   text-transform: uppercase;
 }
 
-.hero-copy h1,
+.hero-copy h2,
 .panel-header h2 {
   color: #0f172a;
   font-weight: 800;
   letter-spacing: -0.04em;
-}
-
-.hero-copy h1 {
-  max-width: 16ch;
-  font-size: clamp(1.8rem, 2.2vw, 2.4rem);
-  line-height: 1.12;
 }
 
 .hero-description {
@@ -607,9 +684,39 @@ onMounted(async () => {
   margin-bottom: 20px;
 }
 
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.filter-button {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.75);
+  color: #475569;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease,
+    transform 0.2s ease;
+}
+
+.filter-button:hover {
+  transform: translateY(-1px);
+}
+
+.filter-button.active {
+  background: #146c63;
+  color: #fff;
+}
+
 .card-list {
   display: grid;
-  gap: 16px;
+  gap: 12px;
   min-height: 0;
   flex: 1;
   overflow-y: auto;
@@ -619,11 +726,11 @@ onMounted(async () => {
 
 .place-card {
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
-  gap: 16px;
-  padding: 14px;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px;
   border: 1px solid rgba(226, 232, 240, 0.95);
-  border-radius: 22px;
+  border-radius: 18px;
   background: #fff;
   cursor: pointer;
   transition:
@@ -643,65 +750,85 @@ onMounted(async () => {
 }
 
 .place-image {
-  width: 112px;
-  height: 112px;
-  border-radius: 18px;
+  width: 92px;
+  height: 92px;
+  border-radius: 14px;
   object-fit: cover;
   background: #dbeafe;
 }
 
 .place-content {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .place-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
+  gap: 10px;
+  margin-bottom: 6px;
 }
 
 .place-heading h3 {
   color: #0f172a;
-  font-size: 1.05rem;
+  font-size: 0.98rem;
   font-weight: 800;
-  line-height: 1.35;
+  line-height: 1.3;
 }
 
 .badge {
   flex-shrink: 0;
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: rgba(15, 118, 110, 0.1);
+  padding: 5px 8px;
   color: #0f766e;
-  font-size: 0.8rem;
+  font-size: 0.74rem;
   font-weight: 700;
 }
 
 .place-address,
-.place-tel,
-.place-category {
+.place-tel {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
 }
 
-.place-category {
-  margin-bottom: 8px;
-  color: #0f766e;
-  font-size: 0.9rem;
-  font-weight: 700;
-  -webkit-line-clamp: 1;
-}
-
 .place-address {
-  margin-bottom: 8px;
+  margin-bottom: 6px;
+  font-size: 0.9rem;
   -webkit-line-clamp: 2;
 }
 
 .place-tel {
+  font-size: 0.88rem;
   -webkit-line-clamp: 1;
+}
+
+.place-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.detail-button {
+  align-self: flex-start;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(20, 108, 99, 0.12);
+  color: #146c63;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+.detail-button:hover {
+  background: #146c63;
+  color: #fff;
 }
 
 .map-frame {
@@ -796,20 +923,19 @@ onMounted(async () => {
 
 .modal-image {
   width: 100%;
-  max-height: 320px;
-  border-radius: 20px;
+  max-height: 280px;
+  border-radius: 18px;
   object-fit: cover;
   background: #dbeafe;
 }
 
 .detail-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
 }
 
-.detail-item,
-.overview-box {
+.detail-item {
   padding: 16px;
   border: 1px solid rgba(226, 232, 240, 0.95);
   border-radius: 18px;
@@ -826,10 +952,15 @@ onMounted(async () => {
 }
 
 .detail-item p,
-.overview-box p {
+.detail-caption {
   margin: 0;
   color: #334155;
   word-break: break-word;
+}
+
+.detail-caption {
+  color: #64748b;
+  font-size: 0.88rem;
 }
 
 @media (max-width: 1100px) {
@@ -899,7 +1030,7 @@ onMounted(async () => {
 
   .place-image {
     width: 100%;
-    height: 180px;
+    height: 150px;
   }
 
   .map-frame {

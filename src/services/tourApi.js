@@ -18,3 +18,14 @@ export async function searchTours(keyword) {
 
   return response.data.data
 }
+
+export async function fetchTourDetail(contentId) {
+  const response = await apiClient.get(`/api/tours/${contentId}`)
+
+  // 상세 API도 동일한 공통 응답 형식을 기대한다.
+  if (!response.data?.success || !response.data.data) {
+    throw new Error('백엔드 상세 응답 형식이 올바르지 않습니다.')
+  }
+
+  return response.data.data
+}
